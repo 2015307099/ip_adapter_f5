@@ -1,0 +1,56 @@
+hydra:
+  run:
+    dir: ckpts/${model.name}_${model.mel_spec.mel_spec_type}_${model.tokenizer}_${datasets.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+datasets:
+  name: VBD
+  batch_size_per_gpu: 3072
+  batch_size_type: frame
+  max_samples: 64
+  num_workers: 8
+
+optim:
+  epochs: 90
+  learning_rate: 5e-5         
+  num_warmup_updates: 10000
+  grad_accumulation_steps: 1
+  max_grad_norm: 1.0
+  bnb_optimizer: False
+
+model:
+  name: F5TTS_VBD_IPAdapter_5e-5_suij    
+  tokenizer: custom
+  tokenizer_path: /yangliusha03/panyuanhao/F5-TTS-main/data/VBD_custom/vocab.txt
+  backbone: DiT
+  # control_layers: 21         
+  arch:
+    dim: 1024
+    depth: 22
+    heads: 16
+    ff_mult: 2
+    text_dim: 512
+    text_mask_padding: True
+    qk_norm: null
+    conv_layers: 4
+    pe_attn_head: null
+    attn_backend: torch
+    attn_mask_enabled: False
+    checkpoint_activations: False
+  mel_spec:
+    target_sample_rate: 24000
+    n_mel_channels: 100
+    hop_length: 256
+    win_length: 1024
+    n_fft: 1024
+    mel_spec_type: vocos
+  vocoder:
+    is_local: False
+    local_path: "/yangliusha02/Model/charactr/vocos-mel-24khz"
+
+ckpts:
+  logger: wandb
+  log_samples: True
+  save_per_updates: 5000
+  keep_last_n_checkpoints: -1
+  last_per_updates: 5000
+  save_dir: ckpts/${model.name}_${model.mel_spec.mel_spec_type}_${model.tokenizer}_${datasets.name}
