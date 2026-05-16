@@ -707,7 +707,7 @@ class DiTBlock(nn.Module):
             ip_attn = rearrange(ip_attn, "B H L D -> B L (H D)")
 
             # 残差叠加
-            attn_output = attn_output + ip_attn*0.1
+            attn_output = attn_output + ip_attn*1.0
 
         # process attention output for input x
         x = x + gate_msa.unsqueeze(1) * attn_output

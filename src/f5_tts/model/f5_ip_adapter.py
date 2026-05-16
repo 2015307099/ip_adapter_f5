@@ -17,9 +17,8 @@ class IPAdapter(nn.Module):
         # nn.init.xavier_uniform_(self.to_k_ip.weight)
         # nn.init.xavier_uniform_(self.to_v_ip.weight)
 
-    def forward(self, x, ip_feat):
-        B, L, D = x.shape
-        N = ip_feat.shape[1]
+    def forward(self, ip_feat):
+        B, N, D = ip_feat.shape  # 只需要 ip_feat 的形状
         H = self.num_heads
         head_dim = D // H
 
@@ -38,10 +37,13 @@ class F5DiTWithIPAdapter(nn.Module):
         dim = base_model.dim
         num_heads = base_model.heads
 
-        # 为每一层（除了第0层）都创建独立的 IP-Adapter
+        # 第0层主干网络作为 Ref Encoder，提取 IP-Adapter 特征
+        self.ref_encoder_block = deepcopy(base_model.transformer_blocks[0])
+
+        # 为每一层都创建独立的 IP-Adapter
         self.ip_adapters = nn.ModuleList([
             IPAdapter(dim=dim, num_heads=num_heads)
-            for _ in range(base_model.depth - 1)
+            for _ in range(base_model.depth)
         ])
 
     def __getattr__(self, name: str):
@@ -58,6 +60,7 @@ class F5DiTWithIPAdapter(nn.Module):
         drop_text=False,
         cfg_infer=False,
         cache=False,
+        control_cond=None,  # mel_spec [B, N, 80]
         **kwargs
     ):
         # --- A. Embedding ---
@@ -66,39 +69,50 @@ class F5DiTWithIPAdapter(nn.Module):
             time = time.repeat(batch)
         t_emb = self.base_model.time_embed(time)
 
-        # --- B. 输入编码 ---
+        t_val = time[0].item() if time.ndim > 0 else time.item()
+        control_scale = 1
+
+        # --- B. Controlnet Input ---
+        current_c = None
+        c = control_cond
+
+        # 获取主路径的输入特征 (已经加噪的 φ) 
         if cfg_infer:
             x_cond = self.base_model.get_input_embed(x, cond, text, True, True, cache, mask)
             x_uncond = self.base_model.get_input_embed(x, cond, text, True, True, cache, mask)
+
+            if c is not None:
+                c_cond = self.base_model.get_input_embed(c, cond, text, True, True, cache, mask)
+                c_uncond = self.base_model.get_input_embed(c, cond, text, True, True, cache, mask)
+                # c_zero = torch.zeros_like(c)
+                # c_uncond = self.base_model.get_input_embed(c_zero, cond, text, True, False, cache, mask)
+
+                current_c = torch.cat((c_cond, c_uncond), dim=0)
+            
             x_main = torch.cat((x_cond, x_uncond), dim=0)
             t_emb = torch.cat((t_emb, t_emb), dim=0)
             mask = torch.cat((mask, mask), dim=0) if mask is not None else None
+            
+    
         else:
             x_main = self.base_model.get_input_embed(x, cond, text, True, True, cache, mask)
+            if c is not None:
+                current_c = self.base_model.get_input_embed(c, cond, text, True, True, cache, mask)
 
         rope = self.base_model.rotary_embed.forward_from_seq_len(seq_len)
+
         x = x_main
 
-        # 第 0 层主干网络 + 提取 IP-Adapter 特征
-        if self.base_model.checkpoint_activations:
-            x_block0 = torch.utils.checkpoint.checkpoint(
-                self.base_model.transformer_blocks[0], x, t_emb, mask, rope, use_reentrant=False
-            )
-        else:
-            x_block0 = self.base_model.transformer_blocks[0](x, t_emb, mask=mask, rope=rope)
-        
-        x = x_block0
-        ip_feat = x_block0  # IP-Adapter 核心特征
+        ip_feat = None
+        # 进入 Ref Encoder
+        ip_feat = self.ref_encoder_block(current_c, t_emb, mask=mask, rope=rope)
 
         # ===================== 运行所有后续层 + 注入 IP-Adapter =====================
-        for index in range(1, self.base_model.depth):
-            ip_adapter = self.ip_adapters[index - 1]
-
-            # 1. 保存原始输入
-            x_input = x.clone()
+        for index in range(self.base_model.depth):
+            ip_adapter = self.ip_adapters[index]
 
             # 2. 先跑 IP-Adapter (用原始输入算 KV)
-            k_ip, v_ip = ip_adapter(x_input, ip_feat)
+            k_ip, v_ip = ip_adapter(ip_feat)
 
             # 3. 运行原始 DiTBlock
             if self.base_model.checkpoint_activations:

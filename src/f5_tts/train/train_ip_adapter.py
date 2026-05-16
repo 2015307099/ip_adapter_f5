@@ -116,8 +116,7 @@ def main(model_cfg):
         # 👇 只改这一行，100% 能找到参数
         # ==============================
         if (
-            "ip_processor" in name
-            or "ip_adapter_single_stream" in name
+            "ref_encoder_block" in name    # 👈 必须加这个！
             or "to_k_ip" in name
             or "to_v_ip" in name
         ):
@@ -179,3 +178,4 @@ def main(model_cfg):
 
 if __name__ == "__main__":
     main()
+

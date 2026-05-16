@@ -214,21 +214,35 @@ def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True):
 
     new_state_dict = {}
     
-    # 核心逻辑：修正 ControlNet 包装带来的命名空间差异
+    # # 核心逻辑：修正 ControlNet 包装带来的命名空间差异
+    # for k, v in raw_state_dict.items():
+    #     new_key = k
+        
+    #     # 1. 移除可能存在的 base_model. 前缀（保持你原有逻辑的兼容性）
+    #     new_key = new_key.replace("base_model.", "")
+
+    #     # 2. 针对 ControlF5DiT 包装的特殊处理：
+    #     # 如果模型期待 transformer.base_model.xxx 但权重里是 transformer.xxx
+    #     # 我们需要把基础权重的路径补全
+    #     if new_key.startswith("transformer."):
+    #         # 排除掉 ControlNet 特有的参数（它们本来就在正确的位置，不需要加 base_model）
+    #         if not new_key.startswith("transformer.base_model.") and \
+    #            not "controlnet" in new_key and \
+    #            not "control_input_proj" in new_key:
+    #             new_key = new_key.replace("transformer.", "transformer.base_model.", 1)
+
+    #     new_state_dict[new_key] = v
     for k, v in raw_state_dict.items():
         new_key = k
-        
-        # 1. 移除可能存在的 base_model. 前缀（保持你原有逻辑的兼容性）
-        new_key = new_key.replace("base_model.", "")
 
-        # 2. 针对 ControlF5DiT 包装的特殊处理：
-        # 如果模型期待 transformer.base_model.xxx 但权重里是 transformer.xxx
-        # 我们需要把基础权重的路径补全
-        if new_key.startswith("transformer."):
-            # 排除掉 ControlNet 特有的参数（它们本来就在正确的位置，不需要加 base_model）
-            if not new_key.startswith("transformer.base_model.") and \
-               not "controlnet" in new_key and \
-               not "control_input_proj" in new_key:
+        # strip DP prefix
+        if new_key.startswith("module."):
+            new_key = new_key.replace("module.", "", 1)
+
+        if new_key.startswith("transformer.") and "base_model" not in new_key:
+            if any(tok in new_key for tok in ("ref_encoder_block", "ip_adapters", "controlnet", "control_input_proj", "adapter")):
+                pass
+            else:
                 new_key = new_key.replace("transformer.", "transformer.base_model.", 1)
 
         new_state_dict[new_key] = v
