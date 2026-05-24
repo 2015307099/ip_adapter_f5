@@ -106,8 +106,8 @@ class CFM(nn.Module):
         dtype = next(self.parameters()).dtype
         if cond.ndim == 2:
             cond = self.mel_spec(cond).permute(0, 2, 1)
-        if control_cond.ndim == 2:
-            control_cond = self.mel_spec(control_cond).permute(0, 2, 1)
+        # if control_cond.ndim == 2:
+        #     control_cond = self.mel_spec(control_cond).permute(0, 2, 1)
 
         cond = cond.to(dtype)
         control_cond = control_cond.to(dtype)
@@ -159,6 +159,11 @@ class CFM(nn.Module):
             cond_mask, cond, torch.zeros_like(cond)
         )  # allow direct control (cut cond audio) with lens passed in
         # step_cond = torch.zeros_like(cond)
+
+        # min_len = min(step_cond.shape[1], step_control_cond.shape[1])
+        # step_cond = step_cond[:, :min_len, :]
+        # step_control_cond = step_control_cond[:, :min_len, :]
+        
 
 
         if batch > 1:

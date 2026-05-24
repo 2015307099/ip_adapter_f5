@@ -4,26 +4,31 @@ hydra:
 
 datasets:
   name: VBD
-  batch_size_per_gpu: 7000
+  batch_size_per_gpu: 3072
   batch_size_type: frame
   max_samples: 64
-  num_workers: 16
+  num_workers: 8
+# datasets:
+#   name: VBD
+#   batch_size_per_gpu: 1500      # 👈 3090 最稳
+#   batch_size_type: frame       # 不变
+#   max_samples: 64               # 👈 关键！必须小
+#   num_workers: 4                # 👈 3090 用 4 最稳
 
 optim:
-  epochs: 90
-  learning_rate: 1e-4          # ✅ 推荐：IP-Adapter 训练用 1e-4
+  epochs: 40
+  learning_rate: 2e-5         
   num_warmup_updates: 10000
   grad_accumulation_steps: 1
   max_grad_norm: 1.0
   bnb_optimizer: False
 
 model:
-  name: F5TTS_VBD_IPAdapter    # ✅ 改名（随便改，标识作用）
+  name: F5TTS_VBD_IPAdapter_2e-5_suij_40_ip*1_zero1    
   tokenizer: custom
   tokenizer_path: /yangliusha03/panyuanhao/F5-TTS-main/data/VBD_custom/vocab.txt
   backbone: DiT
-  # ===================== 关键删除 =====================
-  # control_layers: 21          # ✅ 删掉！不用 ControlNet
+  # control_layers: 21         
   arch:
     dim: 1024
     depth: 22
@@ -37,7 +42,6 @@ model:
     attn_backend: torch
     attn_mask_enabled: False
     checkpoint_activations: False
-    ip_context_dim: 1024       # ✅ 必须加！IP-Adapter 输入维度 = dim
   mel_spec:
     target_sample_rate: 24000
     n_mel_channels: 100

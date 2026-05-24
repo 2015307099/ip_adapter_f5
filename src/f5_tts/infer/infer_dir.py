@@ -30,6 +30,11 @@ from f5_tts.infer.utils_infer import (
     target_rms,
 )
 
+from f5_tts.model.qwen3_audio_encoder import Qwen3ASRAudioEncoder
+import torch
+from transformers import WhisperFeatureExtractor
+
+
 
 parser = argparse.ArgumentParser(
     prog="python3 infer-cli.py",
@@ -310,8 +315,20 @@ ema_model = load_model(
     vocab_file=vocab_file,
     device=device,
     control_layers=control_layers,
-    skip_control_layers=skip_control_layers,
+    # skip_control_layers=skip_control_layers,
 )
+
+# 加载qwen_asr_encoder
+QWAN_ASR_PATH = "/yangliusha03/panyuanhao/Qwen/Qwen3-ASR-1.7B"  
+
+print(f"Loading Qwen3-ASR Audio Encoder from {QWAN_ASR_PATH}...")
+asr_encoder = Qwen3ASRAudioEncoder.from_qwen3_asr_pretrained(
+    QWAN_ASR_PATH,
+    dtype=torch.float32,
+    device=device,
+    attn_implementation="eager"
+)
+feature_extractor = WhisperFeatureExtractor.from_pretrained(QWAN_ASR_PATH)
 
 
 def load_text_from_dir(text_dir, audio_files):
@@ -429,6 +446,8 @@ def main():
                 speed=speed,
                 fix_duration=fix_duration,
                 device=device,
+                asr_encoder=asr_encoder,
+                feature_extractor=feature_extractor
             )
             generated_audio_segments.append(audio_segment)
 

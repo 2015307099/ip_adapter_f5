@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 from f5_tts.model import CFM, Trainer
 from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer
-from f5_tts.model.f5_ip_adapter import F5DiTWithIPAdapter
+from f5_tts.model.f5_ip_adapter import F5DiTWithIPAdapter, QwenProjNet  
 
 
 def load_pretrained_dit(checkpoint_path, model_cls, model_arc, vocab_size, mel_dim, device="cpu"):
@@ -29,10 +29,6 @@ def load_pretrained_dit(checkpoint_path, model_cls, model_arc, vocab_size, mel_d
         state_dict = safetensors.torch.load_file(checkpoint_path, device="cpu")
     else:
         state_dict = torch.load(checkpoint_path, map_location="cpu")
-
-    print("检查点中的键:")
-    for k in state_dict.keys():
-        print(f"  - {k}")
 
     if "ema_model_state_dict" in state_dict:
         state_dict = state_dict["ema_model_state_dict"]
@@ -66,7 +62,7 @@ def load_pretrained_dit(checkpoint_path, model_cls, model_arc, vocab_size, mel_d
 @hydra.main(
     version_base="1.3",
     config_path=str(files("f5_tts").joinpath("configs")),
-    config_name="F5TTS_ip_adapter"  
+    config_name="F5TTS_ip_adapter"
 )
 def main(model_cfg):
     model_cls = hydra.utils.get_class(f"f5_tts.model.{model_cfg.model.backbone}")
@@ -100,28 +96,18 @@ def main(model_cfg):
     print("\n[STEP 2] Wrapping IP-Adapter...")
     ip_transformer = F5DiTWithIPAdapter(pretrained_dit)
 
+
     print("\n[STEP 3] Freeze backbone...")
     for param in ip_transformer.base_model.parameters():
         param.requires_grad = False
 
-    # print("\n[STEP 4] Enable only IP-Adapter...")
-    # trainable_count = 0
-    # for name, param in ip_transformer.named_parameters():
-    #     # 只改这里！！！
-    #     if "to_k_ip" in name or "to_v_ip" in name:
-    #         param.requires_grad = True
-    #         trainable_count += param.numel()
-    #         print(f"✅ Trainable: {name}")
-    print("\n[STEP 4] Enable only IP-Adapter layers...")
+    print("\n[STEP 4] Enable only IP-Adapter + ProjNet...")
     trainable_count = 0
     for name, param in ip_transformer.named_parameters():
-        # ==============================
-        # 👇 只改这一行，100% 能找到参数
-        # ==============================
         if (
-            "ref_encoder_block" in name    # 👈 必须加这个！
-            or "to_k_ip" in name
+            "to_k_ip" in name
             or "to_v_ip" in name
+            or "qwen_proj" in name  # 训练投影层
         ):
             param.requires_grad = True
             trainable_count += param.numel()
@@ -181,4 +167,3 @@ def main(model_cfg):
 
 if __name__ == "__main__":
     main()
-

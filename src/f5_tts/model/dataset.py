@@ -12,6 +12,48 @@ from tqdm import tqdm
 
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import default
+import librosa
+
+QWAN_ASR_PATH = "/yangliusha03/panyuanhao/Qwen/Qwen3-ASR-1.7B"
+
+from f5_tts.model.qwen3_audio_encoder import Qwen3ASRAudioEncoder
+from transformers import WhisperFeatureExtractor
+
+# 加载一次，全局冻结
+qwen_encoder = Qwen3ASRAudioEncoder.from_qwen3_asr_pretrained(
+    QWAN_ASR_PATH,
+    dtype=torch.float32,
+    device="cpu",  # <-- 必须 CPU
+    attn_implementation="eager"
+)
+feature_extractor = WhisperFeatureExtractor.from_pretrained(QWAN_ASR_PATH)
+qwen_encoder.eval()
+for param in qwen_encoder.parameters():
+    param.requires_grad = False
+
+def extract_qwen_feat(audio_24k):
+    # audio_24k: [1, T] 24kHz tensor
+    audio_np = audio_24k.squeeze().cpu().numpy()
+    # 1. 重采样到 16k
+    audio_16k = librosa.resample(audio_np, orig_sr=24000, target_sr=16000)
+
+    # 2. 提取特征
+    feats = feature_extractor(
+        audio_16k, 
+        sampling_rate=16000, 
+        return_tensors="pt", 
+        return_attention_mask=True
+    )
+
+    feature_lens = feats["attention_mask"].sum(dim=-1)
+    feat_len = int(feature_lens.item())
+
+    input_features = feats["input_features"][0, :, :feat_len]
+
+    with torch.no_grad():
+        qwen_out = qwen_encoder(input_features, feature_lens=feature_lens, output_hidden_states=True)
+
+    return qwen_out.hidden_states[18]  # [T, D]
 
 
 class HFDataset(Dataset):
@@ -139,37 +181,64 @@ class CustomDataset(Dataset):
 
             index = (index + 1) % len(self.data)
 
-        if self.preprocessed_mel:
-            mel_spec = torch.tensor(row["mel_spec"])
-            cond_mel_spec = torch.tensor(row["cond_mel_spec"])
-        else:
-            audio, source_sample_rate = torchaudio.load(audio_path)
+        # if self.preprocessed_mel:
+        #     mel_spec = torch.tensor(row["mel_spec"])
+        #     cond_mel_spec = torch.tensor(row["cond_mel_spec"])
+        # else:
+        #     audio, source_sample_rate = torchaudio.load(audio_path)
 
-            # make sure mono input
-            if audio.shape[0] > 1:
-                audio = torch.mean(audio, dim=0, keepdim=True)
-            # resample if necessary
-            if source_sample_rate != self.target_sample_rate:
-                resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
-                audio = resampler(audio)
-            # to mel spectrogram
-            mel_spec = self.mel_spectrogram(audio)
-            mel_spec = mel_spec.squeeze(0)  # '1 d t -> d t'
+        #     # make sure mono input
+        #     if audio.shape[0] > 1:
+        #         audio = torch.mean(audio, dim=0, keepdim=True)
+        #     # resample if necessary
+        #     if source_sample_rate != self.target_sample_rate:
+        #         resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
+        #         audio = resampler(audio)
+        #     # to mel spectrogram
+        #     mel_spec = self.mel_spectrogram(audio)
+        #     mel_spec = mel_spec.squeeze(0)  # '1 d t -> d t'
 
 
-            cond_audio, cond_sr = torchaudio.load(cond_audio_path)
-            if cond_audio.shape[0] > 1:
-                cond_audio = torch.mean(cond_audio, dim=0, keepdim=True)
-            if cond_sr != self.target_sample_rate:
-                resampler = torchaudio.transforms.Resample(cond_sr, self.target_sample_rate)
-                cond_audio = resampler(cond_audio)
+            # cond_audio, cond_sr = torchaudio.load(cond_audio_path)
+            # if cond_audio.shape[0] > 1:
+            #     cond_audio = torch.mean(cond_audio, dim=0, keepdim=True)
+            # if cond_sr != self.target_sample_rate:
+            #     resampler = torchaudio.transforms.Resample(cond_sr, self.target_sample_rate)
+            #     cond_audio = resampler(cond_audio)
                 
-            cond_mel_spec = self.mel_spectrogram(cond_audio)
-            cond_mel_spec = cond_mel_spec.squeeze(0)
+            # cond_mel_spec = self.mel_spectrogram(cond_audio)
+            # cond_mel_spec = cond_mel_spec.squeeze(0)
+
+        # return {
+        #     "mel_spec": mel_spec,
+        #     "cond_mel_spec": cond_mel_spec,
+        #     "text": text,
+        # }
+
+        # =========================
+        # 读取干净音频
+        # =========================
+        audio, sr = torchaudio.load(audio_path)
+        if audio.shape[0] > 1:
+            audio = audio.mean(0, keepdim=True)
+        if sr != self.target_sample_rate:
+            audio = torchaudio.transforms.Resample(sr, self.target_sample_rate)(audio)
+        mel_spec = self.mel_spectrogram(audio).squeeze(0)
+        # =========================
+        # 🔥 读取 cond 音频 → 提取 Qwen 特征
+        # =========================
+        cond_audio, cond_sr = torchaudio.load(cond_audio_path)
+        if cond_audio.shape[0] > 1:
+            cond_audio = cond_audio.mean(0, keepdim=True)
+        if cond_sr != self.target_sample_rate:
+            cond_audio = torchaudio.transforms.Resample(cond_sr, self.target_sample_rate)(cond_audio)
+
+        # 🔥 提取 Qwen 特征
+        qwen_feat = extract_qwen_feat(cond_audio)
 
         return {
             "mel_spec": mel_spec,
-            "cond_mel_spec": cond_mel_spec,
+            "qwen_feat": qwen_feat,  # ✅ 训练用 Qwen 特征
             "text": text,
         }
 
@@ -318,28 +387,59 @@ def load_dataset(
 # collation
 
 
-def collate_fn(batch):
-    mel_specs = [item["mel_spec"].squeeze(0) for item in batch]
-    cond_mel_specs = [item["cond_mel_spec"].squeeze(0) for item in batch]
+# def collate_fn(batch):
+#     mel_specs = [item["mel_spec"].squeeze(0) for item in batch]
+#     cond_mel_specs = [item["cond_mel_spec"].squeeze(0) for item in batch]
 
-    mel_lengths = torch.LongTensor([spec.shape[-1] for spec in mel_specs])
-    max_mel_length = mel_lengths.amax()
+#     mel_lengths = torch.LongTensor([spec.shape[-1] for spec in mel_specs])
+#     max_mel_length = mel_lengths.amax()
 
-    def pad_spec(specs, max_len):
-        padded = []
-        for spec in specs:
-            pad = (0, max_len - spec.size(-1))
-            padded.append(F.pad(spec, pad, value=0))
-        return torch.stack(padded)
+#     def pad_spec(specs, max_len):
+#         padded = []
+#         for spec in specs:
+#             pad = (0, max_len - spec.size(-1))
+#             padded.append(F.pad(spec, pad, value=0))
+#         return torch.stack(padded)
 
-    mel_specs = pad_spec(mel_specs, max_mel_length)
-    cond_mel_specs = pad_spec(cond_mel_specs, max_mel_length)
+#     mel_specs = pad_spec(mel_specs, max_mel_length)
+#     cond_mel_specs = pad_spec(cond_mel_specs, max_mel_length)
 
-    text = [item["text"] for item in batch]
+#     text = [item["text"] for item in batch]
     
+#     return {
+#         "mel": mel_specs,
+#         "cond_mel": cond_mel_specs,
+#         "mel_lengths": mel_lengths,
+#         "text": text,
+#     }
+
+def collate_fn(batch):
+    mel_specs = [item["mel_spec"] for item in batch]
+    qwen_feats = [item["qwen_feat"] for item in batch]
+
+    mel_lengths = torch.LongTensor([m.shape[-1] for m in mel_specs])
+    max_mel_len = mel_lengths.amax()
+
+    def pad_mel(xs, max_len):
+        out = []
+        for x in xs:
+            pad = (0, max_len - x.shape[-1])
+            out.append(F.pad(x, pad, value=0))
+        return torch.stack(out)
+
+    def pad_qwen(xs, max_len):
+        out = []
+        for x in xs:
+            pad = (0, 0, 0, max_len - x.shape[-2])
+            out.append(F.pad(x, pad, value=0))
+        return torch.stack(out)
+
+    mel_specs = pad_mel(mel_specs, max_mel_len)
+    qwen_feats = pad_qwen(qwen_feats, max_mel_len)
+
     return {
         "mel": mel_specs,
-        "cond_mel": cond_mel_specs,
+        "qwen_feat": qwen_feats,
         "mel_lengths": mel_lengths,
-        "text": text,
+        "text": [item["text"] for item in batch]
     }

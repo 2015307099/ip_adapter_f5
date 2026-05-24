@@ -34,6 +34,7 @@ from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
 from f5_tts.model.control_f5 import ControlF5DiT
 from f5_tts.model.f5_ip_adapter import F5DiTWithIPAdapter
 
+
 _ref_audio_cache = {}
 _ref_text_cache = {}
 
@@ -233,19 +234,40 @@ def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True):
 
     #     new_state_dict[new_key] = v
     for k, v in raw_state_dict.items():
+
         new_key = k
 
-        # strip DP prefix
+        # 去掉 DDP 前缀
         if new_key.startswith("module."):
             new_key = new_key.replace("module.", "", 1)
 
-        if new_key.startswith("transformer.") and "base_model" not in new_key:
-            if any(tok in new_key for tok in ("ref_encoder_block", "ip_adapters", "controlnet", "control_input_proj", "adapter")):
-                pass
-            else:
-                new_key = new_key.replace("transformer.", "transformer.base_model.", 1)
+        # 老 backbone checkpoint:
+        # transformer.xxx
+        # ->
+        # transformer.base_model.xxx
+        # print(f"Original key: {new_key}")
+        if (
+            new_key.startswith("transformer.")
+            and not new_key.startswith("transformer.base_model.")
+            and not any(
+                tok in new_key
+                for tok in (
+                    "ref_encoder_block",
+                    "ip_adapters",
+                    "adapter",
+                    "qwen_proj"
+                )
+            )
+        ):
+            new_key = new_key.replace(
+                "transformer.",
+                "transformer.base_model.",
+                1,
+            )
+            print(f"Rewriting key for backbone compatibility: {k} -> {new_key}")
 
         new_state_dict[new_key] = v
+
 
     # 使用 strict=False 因为 ControlNet 推理时可能会有微小的 Key 差异
     # 这样可以确保只要核心权重匹配就能跑通
@@ -281,7 +303,6 @@ def load_model(
     use_ema=True,
     device=device,
     control_layers=0,
-    skip_control_layers=None,
 ):
     if vocab_file == "":
         vocab_file = str(files("f5_tts").joinpath("infer/examples/vocab.txt"))
@@ -297,15 +318,14 @@ def load_model(
     control_layers = control_layers
     
 
-    print(f"Injecting ControlNet with {control_layers} layers... skip_control_layers={skip_control_layers}")
+    print(f"Injecting ControlNet with {control_layers} layers...")
     # transformer = ControlF5DiT(
-    #     base_transformer,
-    #     copy_blocks_num=control_layers,
-    #     skip_control_layers=skip_control_layers,
+    #     base_transformer, 
+    #     copy_blocks_num=control_layers
     # )
     transformer = F5DiTWithIPAdapter(
-        base_transformer,
-    )
+            base_transformer,
+        )
 
     model = CFM(
         transformer=transformer,
@@ -401,12 +421,13 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=print):
     else:
         show_info("Using custom reference text...")
 
+    # 1
     # Ensure ref_text ends with a proper sentence-ending punctuation
-    if not ref_text.endswith(". ") and not ref_text.endswith("。"):
-        if ref_text.endswith("."):
-            ref_text += " "
-        else:
-            ref_text += ". "
+    # if not ref_text.endswith(". ") and not ref_text.endswith("。"):
+    #     if ref_text.endswith("."):
+    #         ref_text += " "
+    #     else:
+    #         ref_text += ". "
 
     print("\nref_text  ", ref_text)
 
@@ -434,6 +455,8 @@ def infer_process(
     speed=speed,
     fix_duration=fix_duration,
     device=device,
+    asr_encoder=None,
+    feature_extractor=None,
 ):
     # Split the input text into batches
     audio, _ = torchaudio.load(ref_audio)
@@ -462,6 +485,8 @@ def infer_process(
             speed=speed,
             fix_duration=fix_duration,
             device=device,
+            asr_encoder=asr_encoder,
+            feature_extractor=feature_extractor,
         )
     )
 
@@ -488,6 +513,8 @@ def infer_batch_process(
     device=None,
     streaming=False,
     chunk_size=2048,
+    asr_encoder=None,
+    feature_extractor=None
 ):
     audio, sr = ref_audio
     if audio.shape[0] > 1:
@@ -507,6 +534,46 @@ def infer_batch_process(
         control_audio = resampler(control_audio)
     audio = audio.to(device)
     control_audio = control_audio.to(device)
+
+    # -------------------------------------------------------------------------
+    # 用 Qwen3-ASR 编码 control_audio，得到 control_cond 输入给模型
+    control_cond = control_audio
+    if asr_encoder is not None and feature_extractor is not None:
+        # 转成 16kHz numpy (和测试代码一致)
+        audio_np = control_audio.squeeze().cpu().numpy()
+        if sr != 16000:
+            import librosa
+            audio_np = librosa.resample(audio_np, orig_sr=sr, target_sr=16000)
+        
+        # 提取特征
+        feats = feature_extractor(
+            audio_np,
+            sampling_rate=16000,
+            return_tensors="pt",
+            return_attention_mask=True
+        )
+
+
+        feature_lens = feats["attention_mask"].sum(dim=-1).to(device)
+        feat_len = int(feature_lens.item())
+        input_features = feats["input_features"][0, :, :feat_len].to(device)
+
+        print("👉 开始进入 asr_encoder") 
+
+        # 送入编码器
+        with torch.no_grad():
+            qwen_out = asr_encoder(
+                input_features,
+                feature_lens=feature_lens,
+                output_hidden_states=True
+            )
+        
+        control_cond = qwen_out.hidden_states[18]
+        # control_cond = qwen_out.last_hidden_state  # [1, T, D]
+        print(f"Extracted control condition from Qwen3-ASR with shape {control_cond.shape}")
+        control_cond = control_cond.unsqueeze(0)  # [T, D] → [1, T, D]
+        print(f"Extracted control condition from Qwen3-ASR with shape {control_cond.shape}")
+    # -------------------------------------------------------------------------
     
     generated_waves = []
     spectrograms = []
@@ -520,7 +587,9 @@ def infer_batch_process(
             local_speed = 0.3
 
         # Prepare the text
-        text_list = [ref_text + gen_text]
+        # text_list = [ref_text + gen_text]
+        text_list = [gen_text]
+
         final_text_list = convert_char_to_pinyin(text_list)
 
         ref_audio_len = math.ceil(audio.shape[-1] / hop_length)
@@ -539,7 +608,7 @@ def infer_batch_process(
         with torch.inference_mode():
             generated, _ = model_obj.sample(
                 cond=audio,
-                control_cond=control_audio,
+                control_cond=control_cond,
                 text=final_text_list,
                 duration=duration,
                 steps=nfe_step,

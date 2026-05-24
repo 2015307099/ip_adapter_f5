@@ -19,6 +19,7 @@ from f5_tts.model import CFM
 from f5_tts.model.dataset import DynamicBatchSampler, collate_fn
 from f5_tts.model.utils import default, exists
 
+torch.multiprocessing.set_start_method('spawn', force=True)
 
 # trainer
 
@@ -365,7 +366,23 @@ class Trainer:
                     mel_spec = batch["mel"].permute(0, 2, 1)
                     mel_lengths = batch["mel_lengths"]
 
-                    control_cond = batch["cond_mel"].permute(0, 2, 1)
+                    # control_cond = batch["cond_mel"].permute(0, 2, 1)
+                    control_cond = batch["qwen_feat"].to(self.accelerator.device)
+
+                    # # add
+                    # if hasattr(self.model, 'qwen_encoder'):
+                    #     with torch.no_grad():
+                    #         # 取参考音频
+                    #         ref_mel = control_cond[0].transpose(0, 1)  # [128, T]
+                    #         ref_len = mel_lengths[0:1]
+
+                    #         # Qwen 提取声音特征
+                    #         qwen_feat = self.model.qwen_encoder(
+                    #             input_features=ref_mel,
+                    #             feature_lens=ref_len
+                    #         ).last_hidden_state
+                    # else:
+                    #     qwen_feat = None
 
                     # TODO. add duration predictor training
                     if self.duration_predictor is not None and self.accelerator.is_local_main_process:
@@ -444,7 +461,7 @@ class Trainer:
                             generated = generated.to(torch.float32)
                             gen_mel_spec = generated.permute(0, 2, 1).to(self.accelerator.device)
                             ref_mel_spec = batch["mel"][0].unsqueeze(0)
-                            cond_mel_spec = batch["cond_mel"][0].unsqueeze(0)
+                            cond_mel_spec = batch["qwen_feat"][0].unsqueeze(0)
                             if self.vocoder_name == "vocos":
                                 gen_audio = vocoder.decode(gen_mel_spec).cpu()
                                 ref_audio = vocoder.decode(ref_mel_spec).cpu()
